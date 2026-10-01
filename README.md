@@ -6,6 +6,7 @@
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-VectorStore-yellow.svg)](https://trychroma.com)
 [![Groq](https://img.shields.io/badge/Groq-LPU%20Inference-orange.svg)](https://groq.com)
 [![NVIDIA SkillEvaluator](https://img.shields.io/badge/NVIDIA-SkillEvaluator%20Tier%203-76B900.svg?logo=nvidia&logoColor=white)](https://github.com/NVIDIA)
+[![License](https://img.shields.io/badge/License-Academic%20%2F%20Proprietary-red.svg)](LICENSE)
 
 > **Projet de Fin d'Études (PFE) — Diplôme National d'Ingénieur en Génie Électrique**  
 > **Auteur :** [Ameur Bacem](https://github.com/becem0)  
@@ -119,6 +120,7 @@ abb-maintenance-rag/
 ├── check_models.py                # Utilitaire de vérification des modèles Groq
 ├── SKILL.md                       # Spécification formelle du Skill selon les standards IA
 ├── requirements.txt               # Dépendances Python du projet
+├── LICENSE                        # Conditions d'utilisation et propriété intellectuelle
 ├── .env.example                   # Modèle des variables d'environnement
 ├── .gitignore                     # Exclusion des fichiers temporaires et secrets
 ├── benchmark_skillevaluator.png   # Résultats d'évaluation graphique
