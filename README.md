@@ -21,6 +21,12 @@ Face à des manuels constructeurs denses dépassant 1 000 pages rédigés en ang
 
 ---
 
+## 🖥️ Aperçu du Cockpit Diagnostic & Jumeau Numérique 3D
+
+![Cockpit Diagnostic & Jumeau Numérique ABB ACS880](cockpit_interface.png)
+
+---
+
 ## 🚀 Fonctionnalités Clés & Architecture
 
 ```
@@ -117,6 +123,7 @@ abb-maintenance-rag/
 ├── .gitignore                     # Exclusion des fichiers temporaires et secrets
 ├── benchmark_skillevaluator.png   # Résultats d'évaluation graphique
 ├── benchmark_skillevaluator_pro.png # Rapport comparatif officiel SkillEvaluator
+├── cockpit_interface.png          # Vue d'ensemble du Cockpit Streamlit & Jumeau 3D
 ├── chroma_db_abb_multi/           # Base vectorielle pré-indexée (Hardware + Firmware)
 └── data/
     ├── acs880.glb                 # Modèle 3D interactif du variateur ABB
