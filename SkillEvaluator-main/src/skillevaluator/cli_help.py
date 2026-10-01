@@ -1,0 +1,333 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Colorized Click help rendering for the SkillEvaluator CLI.
+
+Click's stock help is plain text. This module provides drop-in ``click.Group`` /
+``click.Command`` subclasses that re-render the same help (usage, description,
+options, sub-commands) through :mod:`rich` -- already a base dependency -- so
+``skillevaluator --help`` matches the branded, color-coded ``skill-evaluator -h`` look.
+
+Color degrades gracefully: when stdout is not a TTY (pipes, CI, ``CliRunner``)
+or ``NO_COLOR`` is set, rich emits plain text, so the help stays greppable and
+the existing CLI tests keep passing.
+"""
+
+from __future__ import annotations
+
+import inspect
+import os
+import re
+import shutil
+import sys
+
+import click
+from rich.console import Console, Group, RenderableType
+from rich.padding import Padding
+from rich.table import Table
+from rich.text import Text
+from rich.theme import Theme
+
+from skillevaluator import __version__
+
+# Color scheme for the help screen. Kept intentionally small and semantic so the
+# palette can be tweaked in one place.
+_HELP_THEME = Theme(
+    {
+        "help.usage": "bold",
+        "help.prog": "bold cyan",
+        "help.metavar": "cyan",
+        "help.title": "bold green",
+        "help.heading": "bold yellow",
+        "help.option": "cyan",
+        "help.command": "bold cyan",
+        "help.text": "default",
+        "help.comment": "dim",
+    }
+)
+
+_INDENT = (0, 0, 0, 2)
+
+# ANSI Shadow lettering, stored as text so no font dependency is needed at runtime.
+# Keep the full letter shapes; smaller terminals get a plain title, not squeezed art.
+_WORDMARK = """███████╗██╗  ██╗██╗██╗     ██╗         ███████╗██╗   ██╗ █████╗ ██╗     ██╗   ██╗ █████╗ ████████╗ ██████╗ ██████╗
+██╔════╝██║ ██╔╝██║██║     ██║         ██╔════╝██║   ██║██╔══██╗██║     ██║   ██║██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗
+███████╗█████╔╝ ██║██║     ██║         █████╗  ██║   ██║███████║██║     ██║   ██║███████║   ██║   ██║   ██║██████╔╝
+╚════██║██╔═██╗ ██║██║     ██║         ██╔══╝  ╚██╗ ██╔╝██╔══██║██║     ██║   ██║██╔══██║   ██║   ██║   ██║██╔══██╗
+███████║██║  ██╗██║███████╗███████╗    ███████╗ ╚████╔╝ ██║  ██║███████╗╚██████╔╝██║  ██║   ██║   ╚██████╔╝██║  ██║
+╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝    ╚══════╝  ╚═══╝  ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝"""
+
+
+def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -> RenderableType | None:
+    """Brand interactive root help without adding output to command execution."""
+    if (
+        not getattr(command, "show_banner", False)
+        or ctx.parent is not None
+        or os.environ.get("TERM") in {"dumb", "unknown"}
+        or not sys.stdout.isatty()
+        or not sys.stderr.isatty()
+    ):
+        return None
+
+    try:
+        _WORDMARK.encode(sys.stdout.encoding or "utf-8")
+        supports_blocks = True
+    except UnicodeEncodeError:
+        supports_blocks = False
+    tagline = "Static checks · Deduplication · Live evaluation"
+    if supports_blocks and width >= max(map(len, _WORDMARK.splitlines())):
+        heading = Text(_WORDMARK, style="bold #76b900")
+        heading.highlight_regex(r"[╔╗╚╝═║]+", style="dim #76b900")
+        lines = [Text(""), heading, Text(""), Text(f"v{__version__}  ·  {tagline}", style="dim")]
+    else:
+        lines = [Text(f"SKILLEVALUATOR v{__version__}", style="bold #76b900"), Text(tagline, style="dim")]
+    return Group(*lines)
+
+
+class GroupedOption(click.Option):
+    """``click.Option`` that records the help section it belongs to.
+
+    Pass ``help_group="Tier 3: Live Agent Evaluation"`` (or any label) to place
+    the option under its own heading in the rich help output, mirroring the
+    grouped sections in ``skill-evaluator validate -h``. Options without a ``help_group``
+    fall under the default ``Options:`` heading.
+    """
+
+    def __init__(self, *args: object, help_group: str | None = None, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.help_group = help_group
+
+
+def _wants_color(ctx: click.Context | None) -> bool:
+    """Decide whether to emit ANSI color, mirroring Click/rich conventions."""
+    if ctx is not None and ctx.color is not None:
+        return ctx.color
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _usage(command: click.Command, ctx: click.Context) -> Text:
+    text = Text()
+    text.append("Usage: ", style="help.usage")
+    text.append(ctx.command_path, style="help.prog")
+    for piece in command.collect_usage_pieces(ctx):
+        text.append(" ")
+        text.append(piece, style="help.metavar")
+    return text
+
+
+def _description(command: click.Command) -> RenderableType | None:
+    raw = command.help or command.short_help
+    if not raw:
+        return None
+    # Match Click: drop the post-``\f`` body and re-wrap paragraphs.
+    cleaned = inspect.cleandoc(raw).split("\f", 1)[0].strip()
+    if not cleaned:
+        return None
+    paragraphs = re.split(r"\n\s*\n", cleaned)
+    blocks: list[RenderableType] = []
+    for index, paragraph in enumerate(paragraphs):
+        collapsed = " ".join(paragraph.split())
+        if not collapsed:
+            continue
+        style = "help.title" if index == 0 else "help.text"
+        if blocks:
+            blocks.append(Text(""))
+        blocks.append(Padding(Text(collapsed, style=style), _INDENT, expand=False))
+    return Group(*blocks) if blocks else None
+
+
+def _definition_table(rows: list[tuple[str, str]], *, key_style: str) -> RenderableType:
+    table = Table.grid(padding=(0, 2, 0, 0))
+    # Long choice lists must not consume the entire terminal and hide the
+    # description column (notably Tier 3's environment choices).
+    table.add_column(style=key_style, max_width=38, overflow="fold")
+    table.add_column(style="help.text")
+    for key, value in rows:
+        table.add_row(Text(key), Text(value or ""))
+    return Padding(table, _INDENT, expand=False)
+
+
+def _options(command: click.Command, ctx: click.Context) -> RenderableType | None:
+    # Partition options by their (optional) help_group, preserving declaration
+    # order. ``None`` is the default, untitled "Options:" section.
+    grouped: dict[str | None, list[tuple[str, str]]] = {}
+    seen: list[str | None] = []
+    for param in command.get_params(ctx):
+        record = param.get_help_record(ctx)
+        if record is None:
+            continue
+        name = getattr(param, "help_group", None)
+        if name not in grouped:
+            grouped[name] = []
+            seen.append(name)
+        grouped[name].append((record[0], record[1]))
+    if not grouped:
+        return None
+
+    # Default section first, then named sections in first-seen order.
+    ordered: list[str | None] = ([None] if None in grouped else []) + [n for n in seen if n is not None]
+    descriptions = getattr(command, "help_group_descriptions", {}) or {}
+
+    blocks: list[RenderableType] = []
+    for index, name in enumerate(ordered):
+        if index:
+            blocks.append(Text(""))
+        blocks.append(Text("Options:" if name is None else f"{name}:", style="help.heading"))
+        description = descriptions.get(name)
+        if description:
+            collapsed = " ".join(description.split())
+            blocks.append(Padding(Text(collapsed, style="help.text"), _INDENT, expand=False))
+            blocks.append(Text(""))
+        blocks.append(_definition_table(grouped[name], key_style="help.option"))
+    return Group(*blocks)
+
+
+def _commands(command: click.Command, ctx: click.Context) -> RenderableType | None:
+    if not isinstance(command, click.Group):
+        return None
+    rows: dict[str, tuple[str, str]] = {}
+    for name in command.list_commands(ctx):
+        sub = command.get_command(ctx, name)
+        if sub is None or getattr(sub, "hidden", False):
+            continue
+        # Large limit so rich (not Click) handles wrapping in the help column,
+        # avoiding the truncating "..." Click otherwise inserts.
+        rows[name] = (name, sub.get_short_help_str(limit=120))
+    if not rows:
+        return None
+
+    help_groups = getattr(command, "help_command_groups", ())
+    if not help_groups:
+        return Group(
+            Text("Commands:", style="help.heading"),
+            _definition_table(list(rows.values()), key_style="help.command"),
+        )
+
+    blocks: list[RenderableType] = []
+    grouped: set[str] = set()
+    for heading, names in help_groups:
+        section = [rows[name] for name in names if name in rows]
+        if not section:
+            continue
+        if blocks:
+            blocks.append(Text(""))
+        blocks.append(Text(f"{heading}:", style="help.heading"))
+        blocks.append(_definition_table(section, key_style="help.command"))
+        grouped.update(name for name in names if name in rows)
+
+    remaining = [row for name, row in rows.items() if name not in grouped]
+    if remaining:
+        if blocks:
+            blocks.append(Text(""))
+        blocks.append(Text("Other commands:", style="help.heading"))
+        blocks.append(_definition_table(remaining, key_style="help.command"))
+    return Group(*blocks)
+
+
+def _epilog_line(line: str) -> Text:
+    """Color one pre-formatted epilog line (raw layout is preserved verbatim)."""
+    stripped = line.rstrip()
+    # no_wrap + ignore overflow keeps the author's raw layout intact (argparse
+    # RawDescriptionHelpFormatter parity); we keep lines within 80 cols anyway.
+    opts = {"no_wrap": True, "overflow": "ignore"}
+    if not stripped:
+        return Text("")
+    # Section headers sit at column 0 and end with a colon.
+    if not stripped[0].isspace() and stripped.endswith(":"):
+        return Text(stripped, style="help.heading", **opts)
+    # Dim a trailing "  # comment" (used in the Examples block).
+    marker = stripped.find(" #")
+    if marker > 0:
+        text = Text(**opts)
+        text.append(stripped[: marker + 1], style="help.text")
+        text.append(stripped[marker + 1 :], style="help.comment")
+        return text
+    return Text(stripped, style="help.text", **opts)
+
+
+def _epilog(command: click.Command) -> RenderableType | None:
+    if not command.epilog:
+        return None
+    # Render the epilog raw (preserve the author's line layout, like argparse's
+    # RawDescriptionHelpFormatter that skill-evaluator uses) with light colorization.
+    lines = inspect.cleandoc(command.epilog).split("\n")
+    return Group(*[_epilog_line(line) for line in lines]) if lines else None
+
+
+def render_help(command: click.Command, ctx: click.Context, *, width: int | None = None) -> str:
+    """Render a command's help screen as a (optionally colorized) string."""
+    color = _wants_color(ctx)
+    help_width = width or 80
+    # The wordmark can use a wide terminal while help keeps Click's readable line
+    # length. Conversely, Click's minimum width of 50 must not widen a tiny banner.
+    terminal_width = shutil.get_terminal_size().columns
+    banner = _welcome_banner(command, ctx, width=terminal_width)
+    # Detect terminal capabilities before capture so the banner can use NVIDIA
+    # green on truecolor terminals and degrade to the supported palette elsewhere.
+    console = Console(
+        theme=_HELP_THEME,
+        width=max(help_width, terminal_width) if banner is not None else help_width,
+        highlight=False,
+        force_terminal=color,
+        color_system=("standard" if os.environ.get("TERM") in {"dumb", "unknown"} else "auto") if color else None,
+    )
+
+    sections = [
+        _usage(command, ctx),
+        _description(command),
+        _options(command, ctx),
+        _commands(command, ctx),
+        _epilog(command),
+    ]
+
+    body: list[RenderableType] = []
+    for section in sections:
+        if section is None:
+            continue
+        if body:
+            body.append(Text(""))
+        body.append(section)
+
+    with console.capture() as capture:
+        if banner is not None:
+            console.print(banner, width=terminal_width)
+            console.print()
+        console.print(Group(*body), width=help_width)
+    # Strip the trailing column padding rich adds to aligned table cells so the
+    # output has no trailing whitespace (parity with Click's own help).
+    return "\n".join(line.rstrip() for line in capture.get().splitlines()) + "\n"
+
+
+class RichCommand(click.Command):
+    """``click.Command`` whose ``--help`` is rendered with rich."""
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        formatter.write(render_help(self, ctx, width=formatter.width))
+
+
+class RichGroup(click.Group):
+    """``click.Group`` with rich help that propagates to sub-commands/-groups."""
+
+    command_class = RichCommand
+    group_class = type  # sub-groups created via @group.group() reuse RichGroup
+
+    def __init__(
+        self,
+        *args: object,
+        help_command_groups: tuple[tuple[str, tuple[str, ...]], ...] = (),
+        show_banner: bool = False,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.help_command_groups = help_command_groups
+        self.show_banner = show_banner
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        formatter.write(render_help(self, ctx, width=formatter.width))

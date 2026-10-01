@@ -1,0 +1,35 @@
+name: Publish Docs
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/heads/main') && github.run_number > 1 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Fern
+        shell: bash
+        run: |
+          set -euo pipefail
+          FERN_VERSION="$(node -p "require('./fern/fern.config.json').version")"
+          if [[ ! "$FERN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=fern/fern.config.json::Invalid Fern CLI version: $FERN_VERSION"
+            exit 1
+          fi
+          npm install --global "fern-api@$FERN_VERSION"
+
+      - name: Publish Docs
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+        run: fern generate --docs

@@ -1,0 +1,243 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Code Integrity and Hygiene Validator.
+
+Validates code hygiene: dead links, dependency auditing, test-file discovery.
+"""
+
+import re
+from fnmatch import fnmatchcase
+from pathlib import Path
+
+from skillevaluator.constants import BANNED_PACKAGES
+from skillevaluator.logging_config import get_logger
+from skillevaluator.validators.base import ValidationResult, ValidatorBase, iter_scannable_files
+from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
+
+logger = get_logger(__name__)
+
+_TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
+
+
+def _link_display(value: str) -> str:
+    """Keep untrusted link diagnostics bounded and on one physical line."""
+    escaped = ascii(value[:160])[1:-1]
+    return escaped[:160] + ("..." if len(value) > 160 or len(escaped) > 160 else "")
+
+
+class HygieneValidator(ValidatorBase):
+    """Validates code integrity: dead links, dependencies, and test-file presence."""
+
+    @property
+    def name(self) -> str:
+        return "Code Integrity & Hygiene"
+
+    @property
+    def description(self) -> str:
+        return "Validate dead links, dependencies, and static Python test-file discovery"
+
+    def validate(self, skill_path: Path) -> ValidationResult:
+        """Run hygiene checks on skill(s) at path."""
+        return self._validate_folder_or_skill(
+            skill_path,
+            self._validate_single_skill,
+            action_description="Checking code integrity for",
+        )
+
+    def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
+        """Run all hygiene checks on a single skill directory."""
+        result = ValidationResult()
+        result.merge(self._check_dead_links(skill_path))
+        result.merge(self._audit_dependencies(skill_path))
+        result.merge(self._check_test_presence(skill_path))
+        return result
+
+    def _check_dead_links(self, skill_path: Path) -> ValidationResult:
+        """Verify all relative markdown links point to existing files.
+
+        Markdown files under Tier 1 artifact directories (``evals/``,
+        ``results/``, ``versions/`` and dot-prefixed variants) are skipped
+        via :func:`iter_scannable_files` so that snapshot copies of the
+        live skill do not produce duplicate dead-link reports.
+        """
+        result = ValidationResult()
+        md_files = iter_scannable_files(skill_path, {".md"})
+
+        if not md_files:
+            result.add_success(
+                check_name="dead_links",
+                message="No markdown files found to check for links",
+            )
+            return result
+
+        result.summary.files_scanned += len(md_files)
+        result.add_success(
+            check_name="dead_links_scan",
+            message=f"Checking {len(md_files)} markdown files for dead links",
+            file_count=len(md_files),
+        )
+        for md_file in md_files:
+            try:
+                content = md_file.read_text(encoding="utf-8")
+            except Exception as e:
+                result.add_warning(f"Could not read {md_file}: {e}")
+                continue
+
+            seen_targets: set[str] = set()
+            seen_invalid: set[str] = set()
+            for link_href in markdown_link_targets(content, include_images=True):
+                try:
+                    local_path = normalized_local_path(link_href, allow_directory=True, reject_anchors=True)
+                except ValueError:
+                    if link_href in seen_invalid:
+                        continue
+                    seen_invalid.add(link_href)
+                    result.add_error(
+                        f"Invalid local link in {_link_display(md_file.name)}: {_link_display(link_href)} "
+                        "(absolute or drive-relative path)"
+                    )
+                    continue
+                if local_path is None or local_path in seen_targets:
+                    continue
+                seen_targets.add(local_path)
+                target = md_file.parent / local_path
+
+                try:
+                    exists = target.exists()
+                except (OSError, ValueError):
+                    exists = False
+                if not exists:
+                    result.add_error(f"Dead link in {_link_display(md_file.name)}: {_link_display(link_href)}")
+
+        if not result.errors:
+            result.add_success(
+                check_name="dead_links",
+                message=f"All relative links valid in {len(md_files)} markdown file(s)",
+                files_checked=len(md_files),
+            )
+
+        return result
+
+    def _audit_dependencies(self, skill_path: Path) -> ValidationResult:
+        """Check for unpinned or banned packages in dependency files."""
+        result = ValidationResult()
+        found_any = False
+
+        for req_name in ("requirements.txt", "requirements-dev.txt"):
+            req_file = skill_path / req_name
+            if req_file.exists():
+                found_any = True
+                result.merge(self._check_requirements_file(req_file))
+
+        pyproject = skill_path / "pyproject.toml"
+        if pyproject.exists():
+            found_any = True
+            result.add_success(
+                check_name="pyproject_toml",
+                message="Found pyproject.toml - dependencies managed by uv/pip",
+            )
+
+        if not found_any:
+            result.add_success(
+                check_name="dependencies",
+                message="No dependency files found (requirements.txt, pyproject.toml)",
+            )
+
+        return result
+
+    def _check_requirements_file(self, req_file: Path) -> ValidationResult:
+        """Audit a single requirements.txt for banned/unpinned packages."""
+        result = ValidationResult()
+
+        try:
+            lines = req_file.read_text(encoding="utf-8").strip().split("\n")
+        except Exception as e:
+            result.add_warning(f"Could not read {req_file}: {e}")
+            return result
+
+        result.add_success(
+            check_name="dependency_audit",
+            message=f"Auditing {req_file.name}",
+        )
+        pkg_pattern = re.compile(r"^([a-zA-Z0-9_-]+)")
+        banned_lower = {p.lower() for p in BANNED_PACKAGES}
+
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line or line.startswith(("#", "-")):
+                continue
+
+            match = pkg_pattern.match(line)
+            if not match:
+                continue
+
+            pkg_name = match.group(1).lower()
+            # Pip strips inline comments introduced by whitespace before it
+            # parses a requirement. Remove them here as well so an "@" in a
+            # comment cannot be mistaken for a direct-reference separator;
+            # URL fragments remain intact because their "#" is not preceded
+            # by whitespace.
+            logical_line = re.split(r"\s+#", line, maxsplit=1)[0]
+
+            # Marker comparisons do not constrain the package version. Detect
+            # direct references before the marker so an "@" inside a marker
+            # value cannot hide an otherwise unpinned requirement.
+            requirement_part = logical_line.partition(";")[0]
+            _, direct_reference_separator, direct_reference_target = requirement_part.partition("@")
+            is_direct_reference = bool(direct_reference_separator and direct_reference_target.strip())
+
+            if pkg_name in banned_lower:
+                result.add_error(f"{req_file.name}:{line_num} - Banned package: {pkg_name}")
+            elif not is_direct_reference and not re.search(r"[=<>!]", requirement_part):
+                result.add_warning(f"{req_file.name}:{line_num} - Unpinned: {line}")
+
+        if not result.errors and not result.warnings:
+            result.add_success(
+                check_name="dependency_audit",
+                message=f"{req_file.name} passed dependency audit",
+            )
+
+        return result
+
+    def _check_test_presence(self, skill_path: Path) -> ValidationResult:
+        """Discover conventional Python test filenames without reading or executing them."""
+        result = ValidationResult()
+        try:
+            skill_root = skill_path.resolve(strict=True)
+        except OSError:
+            skill_root = skill_path.resolve()
+
+        test_files: list[Path] = []
+        for candidate in iter_scannable_files(skill_path, {".py"}):
+            if candidate.is_symlink():
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_file() or not resolved.is_relative_to(skill_root):
+                continue
+            if any(fnmatchcase(candidate.name, pattern) for pattern in _TEST_FILE_PATTERNS):
+                test_files.append(candidate)
+
+        result.summary.files_scanned += len(test_files)
+        metadata = {
+            "test_count": len(test_files),
+            "execution_performed": False,
+            "coverage_measured": False,
+            "patterns": list(_TEST_FILE_PATTERNS),
+        }
+        if test_files:
+            message = (
+                f"Found {len(test_files)} standard Python test-file candidate(s); "
+                "target tests were not executed and coverage was not measured"
+            )
+        else:
+            message = (
+                "No standard Python test-file candidates found; target tests were not executed "
+                "and coverage was not measured. Consider adding tests."
+            )
+            result.add_warning("No standard Python test-file candidates found; consider adding tests")
+        result.add_success(check_name="test_discovery", message=message, **metadata)
+        return result

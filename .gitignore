@@ -1,0 +1,34 @@
+# Environments & Virtual Envs
+.venv/
+venv/
+env/
+ENV/
+*.env
+!.env.example
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Runtime generated audio & temp files
+temp_*.wav
+temp_*.mp3
+*.tmp
+*.log
+
+# SQLite Database runtime session data
+maintenance_memory.db
+*.db-journal
+
+# Redundant archives & old single test DB
+SkillEvaluator.zip
+chroma_db_abb/
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

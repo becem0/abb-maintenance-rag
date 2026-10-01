@@ -1,0 +1,85 @@
+{
+  "version": 2,
+  "allowlist": [
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-runtime-dependency",
+      "anchor": "public-extra-vector-db",
+      "reason": "Negative dependency boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-runtime-dependency",
+      "anchor": "public-extra-cluster-runtime",
+      "reason": "Negative dependency boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-product-name",
+      "anchor": "public-extra-retired-product",
+      "reason": "Negative product boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-nvidia-credential",
+      "anchor": "source-retired-credential",
+      "reason": "Negative credential boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "execution-service-integration",
+      "anchor": "source-retired-executor",
+      "reason": "Negative execution boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-runtime-dependency",
+      "anchor": "source-retired-vector-store",
+      "reason": "Negative dependency boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "harbor-upload-integration",
+      "anchor": "gitignore-retired-upload-artifact",
+      "reason": "Negative upload boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_oss_packaging.py",
+      "rule": "internal-nvidia-credential",
+      "anchor": "docs-retired-credential",
+      "reason": "Negative documentation boundary assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/test_provider_config.py",
+      "rule": "internal-nvidia-credential",
+      "anchor": "provider-retired-credential",
+      "reason": "Negative provider credential assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    },
+    {
+      "path": "tests/validators/test_security.py",
+      "rule": "internal-nvidia-credential",
+      "anchor": "security-retired-credential",
+      "reason": "Negative subprocess credential assertion",
+      "expires": "2027-07-08",
+      "review_owner": "oss-release-reviewers"
+    }
+  ]
+}
